@@ -114,6 +114,21 @@ Now you can type `universal-mcp-client` in your terminal anywhere to start the c
 
 *(If this package were published to npm, users could install it globally via `npm install -g universal-mcp-client` and then run `universal-mcp-client` directly.)*
 
+## Installation from npm
+
+Once published, users can install the client globally using npm:
+
+```bash
+npm install -g universal-mcp-client
+```
+*(Replace `universal-mcp-client` with your actual published package name if you had to change it, e.g., `@yourusername/universal-mcp-client`)*
+
+Then, they can run the client from anywhere in their terminal:
+
+```bash
+universal-mcp-client
+```
+
 ## CLI Commands
 
 *   `/help`: Displays available commands.
