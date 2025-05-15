@@ -1,0 +1,54 @@
+{
+  "comment": "This is an example configuration file for the Universal MCP Client. Copy this to config.json and customize it.",
+
+  "llmProvider": "openai",
+  "comment_llmProvider": "Initial LLM provider. Can be 'anthropic', 'openai', or 'google'. Ensure the corresponding API key is in your .env file.",
+
+  "systemMessage": "You are an advanced AI assistant specializing in technical tasks and code. You have access to a variety of tools. Please use them whenever appropriate to fulfill user requests efficiently and accurately. When providing code, ensure it's complete and well-explained.",
+  "comment_systemMessage": "Optional. This message guides the LLM's behavior. If omitted, an environment variable or a default message will be used.",
+
+  "maxConversationHistoryLength": 25,
+  "comment_maxConversationHistoryLength": "Optional. Limits the number of messages (user, assistant, tool) kept in history. Set to 0 or omit for no limit.",
+
+  "mcpServers": {
+    "comment_mcpServers": "Define your MCP servers here. The key is the server name (used in logs and tool display), and the value is its configuration.",
+
+    "slack_server": {
+      "comment": "Example for a Slack MCP server using stdio transport.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-slack"],
+      "transport": {
+        "type": "stdio"
+      },
+      "env": {
+        "comment": "Environment variables for this specific server. These can reference .env variables.",
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}",
+        "SLACK_APP_TOKEN": "${SLACK_APP_TOKEN}",
+        "LOG_LEVEL": "${LOG_LEVEL}"
+      }
+    },
+    "verbwire_server": {
+        "comment": "Example for Verbwire MCP server.",
+        "command": "npx",
+        "args": ["-y", "@verbwire/verbwire-mcp-server"],
+        "env": {
+            "VERBWIRE_API_KEY": "${VERBWIRE_API_KEY}"
+        }
+    },
+    "my_example_streamable_http_server": {
+      "comment": "Example for an MCP server using Streamable HTTP transport. Ensure this server is running and accessible.",
+      "baseUrl": "http://localhost:7000/mcp", 
+      "transport": {
+        "type": "streamable-http",
+        "headers": { 
+        //   "X-API-Key": "${MY_HTTP_SERVER_API_KEY}",
+        //   "Authorization": "Bearer ${MY_HTTP_SERVER_TOKEN}"
+        }
+      },
+      "env": {
+        "comment": "For streamable-http, 'env' is typically not used to configure the server process itself (as it's remote or managed separately), but could be used by the client to resolve placeholders in baseUrl or headers if more advanced substitution were implemented.",
+        "LOG_LEVEL": "${LOG_LEVEL}" 
+      }
+    }
+  }
+} 
