@@ -1,6 +1,6 @@
 {
   "name": "universal-mcp-client",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A universal client for testing Model Context Protocol (MCP) Client/Server Implementations and Interactions",
   "type": "module",
   "main": "src/mcp-client.js",
