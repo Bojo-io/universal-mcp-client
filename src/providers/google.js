@@ -175,13 +175,11 @@ export class GoogleProvider extends BaseProvider {
                             this.logger.debug(`[GoogleProvider.formatConversation] Converted Anthropic image to inlineData for user message.`);
                         } else if (part.type === 'image_mcp' && part.source && part.source.media_type && part.source.data) {
                             // Handle the new image_mcp type
-                            userParts.push({
-                                inlineData: {
-                                    mimeType: part.source.media_type,
-                                    data: part.source.data // Assuming data is already raw base64
-                                }
-                            });
-                            this.logger.debug(`[GoogleProvider.formatConversation] Converted image_mcp (type: ${part.source.media_type}) to inlineData for user message.`);
+                            // GoogleProvider should IGNORE image_mcp parts in user messages when formatting for startChat/reconfigure.
+                            // Its images from tools are handled by MCPClient.continueConversation's specific Google image path (prepareImageMessageParts).
+                            // This image_mcp in history is for other providers if a switch occurs.
+                            this.logger.debug(`[GoogleProvider.formatConversation] Ignoring image_mcp part for startChat history; Google handles its tool images via a dedicated flow.`);
+                            // No push to userParts for image_mcp
                         } else {
                             this.logger.warn(`[GoogleProvider.formatConversation] Skipping unknown part in user message content array: ${JSON.stringify(part).substring(0,100)}`);
                         }

@@ -171,13 +171,11 @@ export class OpenAIProvider extends BaseProvider {
                             });
                             this.logger.debug(`[OpenAIProvider.formatConversation] Converted Anthropic image (type: ${part.source.media_type}) to OpenAI image_url.`);
                         } else if (part.type === 'image_mcp' && part.source && part.source.media_type && part.source.data) {
-                            newContentArray.push({
-                                type: 'image_url',
-                                image_url: {
-                                    url: `data:${part.source.media_type};base64,${part.source.data}`,
-                                },
-                            });
-                            this.logger.debug(`[OpenAIProvider.formatConversation] Converted image_mcp (type: ${part.source.media_type}) to OpenAI image_url.`);
+                            // OpenAIProvider should IGNORE image_mcp, as its images are primarily handled by 
+                            // MCPClient.continueConversation's specific OpenAI image path which creates an image_url directly.
+                            // This image_mcp in history is for other providers if a switch occurs.
+                            this.logger.debug(`[OpenAIProvider.formatConversation] Ignoring image_mcp part; OpenAI handles its tool images via a dedicated flow.`);
+                            // No push to newContentArray for image_mcp
                         } else {
                             this.logger.warn(`[OpenAIProvider.formatConversation] Skipping unknown/incomplete part in user message content array: ${JSON.stringify(part).substring(0,100)}`);
                         }
