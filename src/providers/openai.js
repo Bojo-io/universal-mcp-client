@@ -3,9 +3,10 @@ import { BaseProvider } from './base-provider.js';
 // import { logger as defaultLogger } from '../utils/logging.js'; // If needed directly
 
 export class OpenAIProvider extends BaseProvider {
-    constructor(apiKey, modelName, systemMessage, allTools, logger, initialConversationHistory = []) {
+    constructor(apiKey, modelName, systemMessage, allTools, logger, initialConversationHistory = [], imageAnalysisPromptSuffix) {
         super(apiKey, modelName, systemMessage, allTools, logger);
         this.llmClient = new OpenAI({ apiKey: this.apiKey });
+        this.imageAnalysisPromptSuffix = imageAnalysisPromptSuffix; // Store the suffix
         // OpenAI is mostly stateless for chat history in the same way Google's ChatSession is stateful.
         // History is passed with each request.
         this.initialize(initialConversationHistory);
@@ -19,6 +20,14 @@ export class OpenAIProvider extends BaseProvider {
     async reconfigure(newSystemMessage, newAllTools) {
         await super.reconfigure(newSystemMessage, newAllTools);
         this.logger.info(`[OpenAIProvider] Reconfigured. New system message and tools will be used on next API call.`);
+        // No need to update imageAnalysisPromptSuffix here, as it's passed during construction
+        // and MCPClient would re-create the provider instance if the suffix changes via CLI then a provider switch.
+    }
+
+    // Method to update the suffix if MCPClient calls it after /setimagepromptsuffix
+    updateImageAnalysisPromptSuffix(newSuffix) {
+        this.imageAnalysisPromptSuffix = newSuffix;
+        this.logger.info(`[OpenAIProvider] Image analysis prompt suffix updated to: "${newSuffix}"`);
     }
 
     getToolDeclarations() {
@@ -325,7 +334,7 @@ export class OpenAIProvider extends BaseProvider {
                         }
                     }
                     
-                    const imagePrompt = `The tool '${message.name}' (called with ID: ${message.tool_call_id || 'N/A'}) previously returned an image, and its summary has just been provided. Original textual information from tool: "${textualContentFromToolResult.substring(0,150)}${textualContentFromToolResult.length > 150 ? '...' : ''}". This image is now being provided separately. Please analyze it and use this information if it's relevant to the ongoing conversation or the latest user query. You are capable of identifying elements and their pixel coordinates (x,y from top-left).`;
+                    const imagePrompt = `The tool '${message.name}' (called with ID: ${message.tool_call_id || 'N/A'}) previously returned an image, and its summary has just been provided. Original textual information from tool: "${textualContentFromToolResult.substring(0,150)}${textualContentFromToolResult.length > 150 ? '...' : ''}". This image is now being provided separately. ${this.imageAnalysisPromptSuffix}`;
                     
                     const imageMessageContent = [
                         { type: 'text', text: imagePrompt },

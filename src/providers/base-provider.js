@@ -1,5 +1,5 @@
 export class BaseProvider {
-    constructor(apiKey, modelName, systemMessage, allTools, logger) {
+    constructor(apiKey, modelName, systemMessage, allTools, logger, imageAnalysisPromptSuffix) {
         if (this.constructor === BaseProvider) {
             throw new Error("Abstract classes can't be instantiated.");
         }
@@ -8,6 +8,7 @@ export class BaseProvider {
         this.systemMessage = systemMessage;
         this.allTools = allTools; 
         this.logger = logger;
+        this.imageAnalysisPromptSuffix = imageAnalysisPromptSuffix;
         this.llmClient = null; // The actual SDK client (e.g., Anthropic SDK, OpenAI SDK)
         this.chatSession = null; // For stateful providers like Google Gemini
     }
@@ -56,5 +57,11 @@ export class BaseProvider {
         // Providers like Google will need to override this to re-initialize their chat model with new system instructions/tools.
         this.logger.info(`[BaseProvider] Reconfigured with new system message/tools for ${this.constructor.name}.`);
         // Child classes should call super.reconfigure and then do their specific re-initialization.
+    }
+
+    updateImageAnalysisPromptSuffix(newSuffix) {
+        this.imageAnalysisPromptSuffix = newSuffix;
+        this.logger.info(`[${this.constructor.name}] Image analysis prompt suffix updated to: "${newSuffix}"`);
+        // Individual providers can override if they need to do more than just store it.
     }
 } 

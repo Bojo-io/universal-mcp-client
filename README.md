@@ -10,10 +10,11 @@ It's designed to be easily configurable and extensible, serving as a testing too
 
 *   **Multi-LLM Provider Support:** Seamlessly switch between Anthropic (Claude), OpenAI (GPT models), Google (Gemini models), and DeepSeek (DeepSeek models).
 *   **MCP SDK Integration:** Uses the official MCP SDK for standardized tool discovery and execution with MCP servers.
-*   **Multi-modal LLM Interaction:** Supports image input for vision-capable models from Anthropic, OpenAI, and Google. Tools returning images (e.g., screenshots) can be analyzed by the LLM.
+*   **Multi-modal LLM Interaction:** Supports image input for vision-capable models from Anthropic, OpenAI, and Google. Tools returning images (e.g., screenshots) can be analyzed by the LLM. The prompt used for this analysis (specifically the part instructing the LLM on its capabilities, like identifying pixel coordinates) is configurable.
 *   **Command-Line Interface:** Interactive CLI for sending queries and managing the client.
 *   **Dynamic Provider Switching & Context Preservation:** Change LLM providers and models on-the-fly. Conversation history, including text and images (where supported by provider transitions), is preserved.
 *   **Configurable System Message:** Customize the system message sent to the LLM via `config.json` or environment variables.
+*   **Configurable Image Analysis Prompt Suffix:** Customize the trailing part of the prompt used when asking the LLM to analyze an image returned by a tool.
 *   **Conversation History Limit:** Control the length of the conversation history to manage context and token usage.
 *   **Stdio Transport for MCP Servers:** Primarily uses stdio for connecting to local or npx-run MCP servers.
 *   **Streamable HTTP Transport Support:** Connect to remote MCP servers that expose a Streamable HTTP interface (replaces the older HTTP+SSE).
@@ -139,6 +140,7 @@ universal-mcp-client
         *   `/setprovider anthropic` (uses default model for Anthropic)
         *   `/setprovider deepseek deepseek-chat` (or just `/setprovider deepseek` for default)
 *   `/setsystem <your new system message>`: Sets a new system message for the LLM. If no message is provided, it displays the current system message. Note: For the Google provider, changing the system message will re-initialize its chat session *with the current conversation history preserved* to apply the new instructions.
+*   `/setimagepromptsuffix <your new suffix message>`: Sets the suffix for the prompt used during image analysis (e.g., when an image is returned from a tool). This allows customization of instructions like "Please analyze this image. You are capable of identifying elements and their pixel coordinates (x,y from top-left)." If no suffix is provided, it displays the current suffix.
 *   `/clear`: Clears the current conversation history.
 *   `/exit` or `/quit`: Exits the client.
 
@@ -181,6 +183,7 @@ When a tool (e.g., a screenshot tool) returns an image:
 *   `ANTHROPIC_MODEL`, `OPENAI_MODEL`, `GOOGLE_GEMINI_MODEL`, `DEEPSEEK_MODEL` (optional): Default models to use for each provider if not specified by `/setprovider`. Examples: `claude-3-5-sonnet-latest`, `gpt-4o`, `gemini-1.5-pro-latest`, `deepseek-chat`.
 *   `LOG_LEVEL` (optional): Sets the logging level for the client. Options: `"fatal"`, `"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`, `"silent"`. Default is `"info"`.
 *   `SYSTEM_MESSAGE` (optional): Overrides any system message set in `config.json` or the internal default. Note: For the Google provider, changing this environment variable (which requires a client restart) means the new chat session will start with this system message and a fresh conversation history.
+*   `IMAGE_ANALYSIS_PROMPT_SUFFIX` (optional): Overrides the default suffix for the image analysis prompt.
 *   `MAX_CONVERSATION_HISTORY_LENGTH` (optional): Overrides `maxConversationHistoryLength` from `config.json`.
 *   **Server-Specific Variables:** Any other variables your configured MCP servers might need (e.g., `SLACK_BOT_TOKEN`, `GOFAST_CC_API_KEY`).
 

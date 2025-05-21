@@ -62,6 +62,7 @@ logger.setLevel((process.env.LOG_LEVEL || 'debug').toLowerCase());
 
 // System message for LLMs
 const DEFAULT_SYSTEM_MESSAGE = "You are a helpful AI assistant that has access to various tools through MCP servers. Use these tools when appropriate to help the user.";
+const DEFAULT_IMAGE_ANALYSIS_PROMPT_SUFFIX = "Please analyze this image. You are capable of identifying elements and their pixel coordinates (x,y from top-left).";
 
 /**
  * MCP Client that supports both local and remote servers using the official MCP SDK
@@ -116,6 +117,12 @@ export class MCPClient {
         this.logToolCallVerbosity = 'default';
     }
     logger.info(`Tool call console log verbosity: ${this.logToolCallVerbosity}`);
+
+    // Initialize imageAnalysisPromptSuffix
+    this.imageAnalysisPromptSuffix = config.imageAnalysisPromptSuffix || 
+                                     process.env.IMAGE_ANALYSIS_PROMPT_SUFFIX || 
+                                     DEFAULT_IMAGE_ANALYSIS_PROMPT_SUFFIX;
+    logger.info(`Using image analysis prompt suffix: "${this.imageAnalysisPromptSuffix}"`);
 
     // LLM Client SDK instances (will be managed by provider instances or cleared)
     this.anthropic = null; 
@@ -293,7 +300,7 @@ export class MCPClient {
       }
       try {
         const determinedModelName = newModelName || process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-latest';
-        this.currentLlmProviderInstance = new AnthropicProvider(anthropicApiKey, determinedModelName, this.systemMessage, this.getAllTools(), logger, this.conversation);
+        this.currentLlmProviderInstance = new AnthropicProvider(anthropicApiKey, determinedModelName, this.systemMessage, this.getAllTools(), logger, this.conversation, this.imageAnalysisPromptSuffix);
         this.model = determinedModelName; // For display
         this.config.llmProvider = 'anthropic';
         if (!initialSetup) console.log(`Switched to Anthropic provider with model: ${this.model}`);
@@ -314,7 +321,7 @@ export class MCPClient {
       }
       try {
         const determinedModelName = newModelName || process.env.OPENAI_MODEL || 'gpt-4o';
-        this.currentLlmProviderInstance = new OpenAIProvider(openaiApiKey, determinedModelName, this.systemMessage, this.getAllTools(), logger, this.conversation);
+        this.currentLlmProviderInstance = new OpenAIProvider(openaiApiKey, determinedModelName, this.systemMessage, this.getAllTools(), logger, this.conversation, this.imageAnalysisPromptSuffix);
         this.openaiModel = determinedModelName; // For display
         this.config.llmProvider = 'openai';
         if (!initialSetup) console.log(`Switched to OpenAI provider with model: ${this.openaiModel}`);
@@ -346,7 +353,7 @@ export class MCPClient {
         // For now: just instantiate. The `initialize` in GoogleProvider uses an empty history for startChat.
         // THIS WILL BE A PROBLEM FOR CONTEXT RETENTION WHEN SWITCHING TO GOOGLE or /setsystem for google.
         // We will address this by modifying GoogleProvider to accept initial history, or MCPClient passes it.
-        this.currentLlmProviderInstance = new GoogleProvider(geminiApiKey, determinedModelName, this.systemMessage, this.getAllTools(), logger, this.conversation);
+        this.currentLlmProviderInstance = new GoogleProvider(geminiApiKey, determinedModelName, this.systemMessage, this.getAllTools(), logger, this.conversation, this.imageAnalysisPromptSuffix);
         // The GoogleProvider constructor now calls its own `initialize`, which sets up chatSession.
 
         this.geminiModel = determinedModelName; // For display
@@ -643,6 +650,7 @@ export class MCPClient {
         console.log('  /setprovider <name> [model] - Switch LLM provider (e.g., /setprovider google gemini-2.5-flash-preview-04-17).');
         console.log('                         Supported providers: anthropic, openai, google, deepseek.');
         console.log('  /help                - Show this help message.');
+        console.log('  /setimagepromptsuffix <suffix> - Set the suffix for image analysis prompts.');
         this.rl.prompt();
         return;
       }
@@ -696,6 +704,27 @@ export class MCPClient {
         } else {
           console.error('Usage: /setprovider <provider_name> [model_name]');
           console.error('Supported providers: anthropic, openai, google, deepseek');
+        }
+        this.rl.prompt();
+        return;
+      }
+      
+      if (input.startsWith('/setimagepromptsuffix ')) {
+        const newSuffix = input.substring('/setimagepromptsuffix '.length).trim();
+        if (newSuffix) {
+          this.imageAnalysisPromptSuffix = newSuffix;
+          logger.info(`Image analysis prompt suffix updated to: "${this.imageAnalysisPromptSuffix}"`);
+          console.log(`Image analysis prompt suffix updated. This will apply to new image analyses.`);
+          // If the current provider has a method to update this dynamically, call it.
+          // Otherwise, it will be picked up if the provider is re-initialized.
+          if (this.currentLlmProviderInstance && typeof this.currentLlmProviderInstance.updateImageAnalysisPromptSuffix === 'function') {
+            this.currentLlmProviderInstance.updateImageAnalysisPromptSuffix(this.imageAnalysisPromptSuffix);
+            logger.info(`Informed current provider of new image analysis prompt suffix.`);
+          }
+        } else {
+          console.log('Current image analysis prompt suffix:');
+          console.log(this.imageAnalysisPromptSuffix);
+          console.log('Usage: /setimagepromptsuffix <your new suffix>');
         }
         this.rl.prompt();
         return;
@@ -1075,7 +1104,7 @@ export class MCPClient {
             }
 
             const toolName = lastMessage.name || 'the tool';
-            const imagePrompt = `The tool '${toolName}' returned an image. Based on your previous request: "${originalUserQuery.substring(0, 200)}${originalUserQuery.length > 200 ? '...':''}". Please analyze this image. You are capable of identifying elements and their pixel coordinates (x,y from top-left).`;
+            const imagePrompt = `The tool '${toolName}' returned an image. Based on your previous request: "${originalUserQuery.substring(0, 200)}${originalUserQuery.length > 200 ? '...':''}". ${this.imageAnalysisPromptSuffix}`;
             
             const imageContentParts = this.currentLlmProviderInstance.prepareImageMessageContent(base64ImageData, mimeType, imagePrompt);
 

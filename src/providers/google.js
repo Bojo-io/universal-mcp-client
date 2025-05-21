@@ -3,10 +3,11 @@ import { BaseProvider } from './base-provider.js';
 import { logger as defaultLogger } from '../utils/logging.js'; // Keep for direct use if a method becomes static or for default in helpers
 
 export class GoogleProvider extends BaseProvider {
-    constructor(apiKey, modelName, systemMessage, allTools, logger, initialConversationHistory = []) {
+    constructor(apiKey, modelName, systemMessage, allTools, logger, initialConversationHistory = [], imageAnalysisPromptSuffix) {
         super(apiKey, modelName, systemMessage, allTools, logger);
         this.googleAI = new GoogleGenerativeAI(this.apiKey);
         this.generativeModel = null; // Will be set in initialize
+        this.imageAnalysisPromptSuffix = imageAnalysisPromptSuffix; // Store the suffix
         // chatSession (this.chatSession) is inherited from BaseProvider and will be set in initialize
         this.initialize(initialConversationHistory); // Auto-initialize upon construction, passing history
     }
@@ -64,6 +65,16 @@ export class GoogleProvider extends BaseProvider {
         } else {
             this.logger.info("[GoogleProvider] No system message change, model configuration remains.");
         }
+        // imageAnalysisPromptSuffix is handled if MCPClient re-creates the instance.
+    }
+
+    // Method to update the suffix if MCPClient calls it after /setimagepromptsuffix
+    updateImageAnalysisPromptSuffix(newSuffix) {
+        this.imageAnalysisPromptSuffix = newSuffix;
+        this.logger.info(`[GoogleProvider] Image analysis prompt suffix updated to: "${newSuffix}". It will be used for new image prompts.`);
+        // Note: For Google, historical image prompts are built during full formatConversation for startChat.
+        // If the suffix changes mid-session, only *new* image analysis prompts (via prepareImageMessageParts)
+        // will immediately use it. A provider re-initialization (e.g. /setprovider) would pick it up for historical ones.
     }
 
     // Internal helper for schema transformation, using instance logger
@@ -240,7 +251,7 @@ export class GoogleProvider extends BaseProvider {
                         }
                     }
 
-                    const imagePrompt = `The tool '${message.name}' (called with ID: ${message.tool_call_id || 'N/A'}) previously returned an image. The summary of that tool call has just been provided in the history. Original textual information from tool: "${textualContentFromToolResult.substring(0,150)}${textualContentFromToolResult.length > 150 ? '...' : ''}". This image is now being provided. Please analyze it and use this information if it's relevant to the ongoing conversation or the latest user query.`;
+                    const imagePrompt = `The tool '${message.name}' (called with ID: ${message.tool_call_id || 'N/A'}) previously returned an image. The summary of that tool call has just been provided in the history. Original textual information from tool: "${textualContentFromToolResult.substring(0,150)}${textualContentFromToolResult.length > 150 ? '...' : ''}". This image is now being provided. ${this.imageAnalysisPromptSuffix}`;
                     
                     const userImageMessageParts = [
                         { text: imagePrompt }, 
@@ -413,6 +424,11 @@ export class GoogleProvider extends BaseProvider {
         
         let textForImagePrompt = `The tool '${toolName}' returned the accompanying image. Please analyze it and respond to the ongoing request.`; 
         
+        // Default if context not found
+        if (this.imageAnalysisPromptSuffix && !textForImagePrompt.endsWith(this.imageAnalysisPromptSuffix)) {
+             textForImagePrompt = `The tool '${toolName}' returned the accompanying image. ${this.imageAnalysisPromptSuffix}`;
+        }
+        
         // New robust logic: Iterate backwards to find the relevant user message.
         // The `fullConversationHistory` when this is called by MCPClient looks like:
         // [..., some_user_message (U_orig), assistant_called_tool (A_tc), tool_result (T_res), assistant_response_to_tool_data (A_sum)]
@@ -452,12 +468,14 @@ export class GoogleProvider extends BaseProvider {
             }
 
             if (foundUserMessage) {
-                textForImagePrompt = `The tool '${toolName}' returned an image. Based on your request: "${foundUserMessage}", please use this image to formulate your response.`;
+                textForImagePrompt = `The tool '${toolName}' returned an image. Based on your request: "${foundUserMessage}". ${this.imageAnalysisPromptSuffix}`;
             } else {
-                this.logger.warn(`[GoogleProvider.prepareImageMessageParts] Could not robustly find a preceding user message for context. Using generic image prompt.`);
+                this.logger.warn(`[GoogleProvider.prepareImageMessageParts] Could not robustly find a preceding user message for context. Using generic image prompt with configured suffix.`);
+                // The textForImagePrompt is already set to a default with suffix if foundUserMessage is null
             }
         } else {
-            this.logger.warn(`[GoogleProvider.prepareImageMessageParts] Conversation history too short (${fullConversationHistory?.length}) for robust user message search. Using generic prompt.`);
+            this.logger.warn(`[GoogleProvider.prepareImageMessageParts] Conversation history too short (${fullConversationHistory?.length}) for robust user message search. Using generic prompt with suffix.`);
+             // The textForImagePrompt is already set to a default with suffix
         }
 
         const textPromptPart = { text: textForImagePrompt };

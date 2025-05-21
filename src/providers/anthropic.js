@@ -4,8 +4,8 @@ import { BaseProvider } from './base-provider.js';
 // import { logger } from '../utils/logging.js'; 
 
 export class AnthropicProvider extends BaseProvider {
-    constructor(apiKey, modelName, systemMessage, allTools, logger, initialConversationHistory = []) {
-        super(apiKey, modelName, systemMessage, allTools, logger);
+    constructor(apiKey, modelName, systemMessage, allTools, logger, initialConversationHistory = [], imageAnalysisPromptSuffix) {
+        super(apiKey, modelName, systemMessage, allTools, logger, imageAnalysisPromptSuffix);
         this.llmClient = new Anthropic({ apiKey: this.apiKey, defaultHeaders: { 'anthropic-version': '2023-06-01' } });
         // Anthropic is stateless for chat history in the same way Google's ChatSession is stateful.
         // History is passed with each request.

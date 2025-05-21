@@ -2,8 +2,8 @@ import OpenAI from 'openai';
 import { BaseProvider } from './base-provider.js';
 
 export class DeepSeekProvider extends BaseProvider {
-    constructor(apiKey, modelName, systemMessage, allTools, logger, initialConversationHistory = []) {
-        super(apiKey, modelName, systemMessage, allTools, logger);
+    constructor(apiKey, modelName, systemMessage, allTools, logger, initialConversationHistory = [], imageAnalysisPromptSuffix) {
+        super(apiKey, modelName, systemMessage, allTools, logger, imageAnalysisPromptSuffix);
         this.llmClient = new OpenAI({ 
             apiKey: this.apiKey, 
             baseURL: "https://api.deepseek.com/v1" // Standard DeepSeek API Base URL
