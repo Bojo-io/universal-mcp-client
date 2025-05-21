@@ -58,7 +58,7 @@ import { DeepSeekProvider } from './providers/deepseek.js';
 const require = createRequire(import.meta.url);
 
 // Configure logging
-logger.setLevel(process.env.LOG_LEVEL || 'debug');
+logger.setLevel((process.env.LOG_LEVEL || 'debug').toLowerCase());
 
 // System message for LLMs
 const DEFAULT_SYSTEM_MESSAGE = "You are a helpful AI assistant that has access to various tools through MCP servers. Use these tools when appropriate to help the user.";
@@ -105,6 +105,17 @@ export class MCPClient {
     } else {
       logger.info('No limit set for conversation history length.');
     }
+
+    // Configure console logging for tool results
+    this.logToolResultsBase64Full = (config.logToolResultsBase64Full === true || process.env.LOG_TOOL_RESULTS_BASE64_FULL === 'true');
+    logger.info(`Log full base64 in tool results: ${this.logToolResultsBase64Full}`);
+
+    this.logToolCallVerbosity = config.logToolCallVerbosity || process.env.LOG_TOOL_CALL_VERBOSITY || 'default';
+    if (!['minimal', 'default', 'debug'].includes(this.logToolCallVerbosity)) {
+        logger.warn(`Invalid logToolCallVerbosity value: "${this.logToolCallVerbosity}". Defaulting to 'default'.`);
+        this.logToolCallVerbosity = 'default';
+    }
+    logger.info(`Tool call console log verbosity: ${this.logToolCallVerbosity}`);
 
     // LLM Client SDK instances (will be managed by provider instances or cleared)
     this.anthropic = null; 
@@ -183,6 +194,69 @@ export class MCPClient {
     // Sanitize modelName to remove potentially problematic characters for prompt display if any
     // For now, direct usage is fine, but could add regex replace for non-alphanumeric if needed.
     return `${providerName}${modelName ? ` (${modelName.split('/').pop()})` : ''}> `; // Show only last part of model name if it's a path
+  }
+
+  /**
+   * Helper to deeply truncate base64 strings within an object for logging.
+   * @param {any} obj The object to process.
+   * @returns {any} A new object with base64 strings truncated.
+   * @private
+   */
+  _truncateBase64InObject(obj) {
+    const B64_TRUNCATE_LENGTH = 50; // Length of preview for base64
+    const B64_MIN_LENGTH_TO_TRUNCATE = 200; // Only truncate if longer than this
+
+    // --- BEGIN ADDED DEBUG LOGGING ---
+    if (typeof obj === 'string' && obj.startsWith('data:') && obj.includes(';base64,')) {
+        logger.debug(`[_truncateBase64InObject] Processing data URL string. Length: ${obj.length}`);
+    } else if (typeof obj === 'object' && obj !== null) {
+        if (obj.base64Data && typeof obj.base64Data === 'string') {
+            logger.debug(`[_truncateBase64InObject] Object has base64Data key with string length: ${obj.base64Data.length}`);
+        }
+        if (obj.data && typeof obj.data === 'string' && (obj.type === 'image' || (obj.source && obj.source.type === 'base64'))) {
+             logger.debug(`[_truncateBase64InObject] Object has data key (image context) with string length: ${obj.data.length}`);
+        }
+    }
+    // --- END ADDED DEBUG LOGGING ---
+
+    if (typeof obj === 'string') {
+      if (obj.startsWith('data:') && obj.includes(';base64,')) {
+        const parts = obj.split(';base64,');
+        if (parts.length === 2 && parts[1].length > B64_MIN_LENGTH_TO_TRUNCATE) {
+          return `${parts[0]};base64,${parts[1].substring(0, B64_TRUNCATE_LENGTH)}... (truncated len:${parts[1].length})`;
+        }
+      }
+      return obj;
+    } else if (Array.isArray(obj)) {
+      return obj.map(item => this._truncateBase64InObject(item));
+    } else if (typeof obj === 'object' && obj !== null) {
+      const newObj = {};
+      for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+          if (key === 'base64Data' || key === 'data') { // Specific keys often holding base64
+            const value = obj[key];
+            if (typeof value === 'string' && value.length > B64_MIN_LENGTH_TO_TRUNCATE) {
+                // Simpler check for non-data-URL raw base64 strings
+                const isLikelyBase64 = /^[A-Za-z0-9+/=]+$/.test(value.substring(0,100)); // Check prefix
+                if (isLikelyBase64 && !value.startsWith('data:')) { // Ensure it's not a data URL already handled by string path
+                     newObj[key] = `${value.substring(0, B64_TRUNCATE_LENGTH)}... (raw_b64 truncated len:${value.length})`;
+                     // Safe substring for logging preview
+                     const preview = newObj[key].substring(0, Math.min(70, newObj[key].length));
+                     logger.debug(`[_truncateBase64InObject] Truncated raw base64 string for key '${key}'. Preview: ${preview}`);
+                } else {
+                    newObj[key] = this._truncateBase64InObject(value); // recurse if not matching common keys for raw b64 or if it is a data URL
+                }
+            } else {
+                 newObj[key] = this._truncateBase64InObject(value);
+            }
+          } else {
+            newObj[key] = this._truncateBase64InObject(obj[key]);
+          }
+        }
+      }
+      return newObj;
+    }
+    return obj;
   }
 
   /**
@@ -377,7 +451,10 @@ export class MCPClient {
       const finalChildEnv = {
         ...process.env,
         ...processedEnv,
-        LOG_LEVEL: logger.level // Explicitly set LOG_LEVEL from the main logger instance
+        // Conditionally set child's LOG_LEVEL
+        // Pass 'debug' to child only if main logger is 'debug' AND tool call verbosity is also 'debug'
+        // Otherwise, default child to 'info' to suppress verbose server debug logs like full base64.
+        LOG_LEVEL: (this.logToolCallVerbosity === 'debug' && logger.level.toLowerCase() === 'debug') ? 'debug' : 'info'
       };
 
       transport = new StdioClientTransport({
@@ -807,7 +884,10 @@ export class MCPClient {
       for (const toolCall of toolCalls) {
         let toolResultForAugmentation = null; // Variable to store the result for later augmentation
         try {
-          console.log(`\nExecuting tool: ${toolCall.name}...`);
+          if (this.logToolCallVerbosity === 'minimal' || this.logToolCallVerbosity === 'default' || this.logToolCallVerbosity === 'debug') {
+            console.log(`\nExecuting tool: ${toolCall.name}...`);
+          }
+          
           let serverName = null;
           for (const [name, tools] of this.tools) { if (tools.some(t => t.name === toolCall.name)) { serverName = name; break; } }
           if (!serverName) throw new Error(`No server found for tool: ${toolCall.name}`);
@@ -824,15 +904,66 @@ export class MCPClient {
             content: result 
           });
 
-          // Display the result (simplified for now, can be enhanced)
-          console.log('Tool result:');
-          if (typeof result === 'string') console.log(result);
-          else if (result && result.content && Array.isArray(result.content)) {
-            const textPart = result.content.find(p => p.type === 'text');
-            if (textPart) console.log(textPart.text);
-            else console.log(JSON.stringify(result.content)); // fallback to stringify content array
-          } 
-          else console.log(JSON.stringify(result, null, 2)); // fallback to stringify whole result
+          // Display the result based on verbosity settings
+          if (this.logToolCallVerbosity === 'default' || this.logToolCallVerbosity === 'debug') {
+            console.log('Tool result:');
+
+            // --- BEGIN ADDED DEBUG LOGGING ---
+            if (typeof result === 'object' && result !== null && !this.logToolResultsBase64Full) {
+              logger.debug('[MCPClient.handleLLMResponse] BEFORE truncation: Checking result object for base64 content.');
+              if (result.image && typeof result.image.base64Data === 'string') {
+                logger.debug(`[MCPClient.handleLLMResponse] BEFORE truncation: result.image.base64Data length: ${result.image.base64Data.length}`);
+              }
+              if (result.content && Array.isArray(result.content)) {
+                result.content.forEach((part, index) => {
+                  if (part.type === 'image' && typeof part.data === 'string') {
+                    logger.debug(`[MCPClient.handleLLMResponse] BEFORE truncation: result.content[${index}] (image part) data length: ${part.data.length}`);
+                  }
+                });
+              }
+            }
+            // --- END ADDED DEBUG LOGGING ---
+
+            const resultToLog = this.logToolResultsBase64Full ? result : this._truncateBase64InObject(result);
+
+            // --- BEGIN ADDED DEBUG LOGGING ---
+            if (typeof resultToLog === 'object' && resultToLog !== null && !this.logToolResultsBase64Full) {
+              logger.debug('[MCPClient.handleLLMResponse] AFTER truncation: Checking resultToLog object for base64 content.');
+              if (resultToLog.image && typeof resultToLog.image.base64Data === 'string') {
+                logger.debug(`[MCPClient.handleLLMResponse] AFTER truncation: resultToLog.image.base64Data (string check): ${resultToLog.image.base64Data.substring(0, Math.min(70, resultToLog.image.base64Data.length))}...`);
+              }
+               if (resultToLog.base64Data && typeof resultToLog.base64Data === 'string') { // Check if root object has base64Data
+                logger.debug(`[MCPClient.handleLLMResponse] AFTER truncation: resultToLog.base64Data (string check): ${resultToLog.base64Data.substring(0, Math.min(70, resultToLog.base64Data.length))}...`);
+              }
+              if (resultToLog.content && Array.isArray(resultToLog.content)) {
+                resultToLog.content.forEach((part, index) => {
+                  if (part.type === 'image' && typeof part.data === 'string') {
+                    logger.debug(`[MCPClient.handleLLMResponse] AFTER truncation: resultToLog.content[${index}] (image part) data: ${part.data.substring(0, Math.min(70, part.data.length))}...`);
+                  } else if (part.type === 'image_url' && part.image_url && typeof part.image_url.url === 'string') {
+                     logger.debug(`[MCPClient.handleLLMResponse] AFTER truncation: resultToLog.content[${index}] (image_url part) url: ${part.image_url.url.substring(0, Math.min(100, part.image_url.url.length))}...`);
+                  }
+                });
+              }
+            }
+             logger.debug(`[MCPClient.handleLLMResponse] Final resultToLog type: ${typeof resultToLog}`);
+            // --- END ADDED DEBUG LOGGING ---
+            
+            if (this.logToolCallVerbosity === 'debug') {
+                // For debug mode, always log the potentially truncated full object
+                console.log(JSON.stringify(resultToLog, null, 2));
+            } else { // 'default' verbosity
+                if (typeof resultToLog === 'string') console.log(resultToLog);
+                else if (resultToLog && resultToLog.content && Array.isArray(resultToLog.content)) {
+                  const textPart = resultToLog.content.find(p => p.type === 'text');
+                  if (textPart) console.log(textPart.text); // Prints only text for multi-part
+                  else console.log(JSON.stringify(resultToLog.content, null, 2)); // Prints content array if no text part
+                } 
+                else console.log(JSON.stringify(resultToLog, null, 2)); // Prints whole object if not string/multi-part
+            }
+          } else if (this.logToolCallVerbosity === 'minimal') {
+            // Optionally, log a very brief confirmation like "Tool execution completed." or nothing more.
+            // For now, minimal means only the "Executing tool..." message.
+          }
           
           await this.continueConversation(); // Let the current provider continue with the tool result
 
@@ -846,7 +977,12 @@ export class MCPClient {
         // AFTER continueConversation, add the synthetic user message if an image was in the tool result
         if (toolResultForAugmentation) {
           const extractedImage = this._extractImageFromMcpToolResult(toolResultForAugmentation);
-          if (extractedImage && extractedImage.base64Data && extractedImage.mimeType) {
+          // Only add synthetic image_mcp message for providers that DON'T have robust internal handling
+          // for images within tool results or dedicated multi-step flows (like OpenAI/Google).
+          // Anthropic can handle images directly in its tool_result content.
+          const providersToExcludeImageMcpAugmentation = ['openai', 'anthropic', 'google'];
+          if (!providersToExcludeImageMcpAugmentation.includes(this.config.llmProvider) &&
+              extractedImage && extractedImage.base64Data && extractedImage.mimeType) {
             const syntheticUserMessage = {
               role: 'user',
               content: [
@@ -890,30 +1026,87 @@ export class MCPClient {
         this._trimConversationHistory();
         const messagesForLLM = this.currentLlmProviderInstance.formatConversation(this.conversation);
         response = await this.currentLlmProviderInstance.sendMessage(messagesForLLM);
+        
+        // Process and add LLM's response (the acknowledgement to the tool summary) to history.
+        // This ensures the acknowledgement is ALWAYS added, removing the 'skipInitialHandleLLMResponse' logic.
+        // await this.handleLLMResponse(response); // REMOVED - this was causing double processing for Anthropic
+
       } else if (this.config.llmProvider === 'openai') {
-        if (!this.currentLlmProviderInstance) {
-            logger.warn("OpenAI provider instance not available in continueConversation. Attempting re-initialization.");
-            const currentOpenAIModel = this.openaiModel || process.env.OPENAI_MODEL || 'gpt-4o';
-            if (!this.setLLMProvider('openai', currentOpenAIModel, true)) {
-                throw new Error("OpenAI provider instance failed to re-initialize. Please use /setprovider openai [model_name].");
+        // Check the last message in the conversation. If it's a tool result and contains an image,
+        // then this `continueConversation` call is the one that should trigger the image analysis.
+        const lastMessage = this.conversation.length > 0 ? this.conversation[this.conversation.length - 1] : null;
+
+        if (lastMessage && lastMessage.role === 'tool') {
+          const { base64ImageData, mimeType } = this.currentLlmProviderInstance.extractImageFromToolResult(lastMessage.content);
+
+          if (base64ImageData && mimeType) {
+            logger.info('[MCPClient.continueConversation] OpenAI: Image detected in last tool result. Proceeding with image analysis.');
+            
+            let originalUserQuery = "Describe the image."; // Default prompt
+            let assistantMessageThatCalledTheTool = null;
+            let indexOfAssistantMessage = -1;
+
+            // Find the assistant message that made the tool call for this image
+            for (let i = this.conversation.length - 2; i >= 0; i--) { // Start before the tool result message
+                const msg = this.conversation[i];
+                if (msg.role === 'assistant' && msg.tool_calls) {
+                    if (msg.tool_calls.some(tc => tc.id === lastMessage.tool_call_id)) {
+                        assistantMessageThatCalledTheTool = msg;
+                        indexOfAssistantMessage = i;
+                        logger.debug(`[MCPClient.continueConversation] OpenAI: Found assistant message (index ${i}) that called tool ${lastMessage.tool_call_id}`);
+                        break;
+                    }
+                }
             }
-            logger.info("Successfully re-initialized OpenAI provider instance in continueConversation.");
+
+            if (assistantMessageThatCalledTheTool && indexOfAssistantMessage > 0) {
+                for (let i = indexOfAssistantMessage - 1; i >= 0; i--) {
+                    if (this.conversation[i].role === 'user') {
+                        const rawContent = this.conversation[i].content;
+                        if (typeof rawContent === 'string') {
+                            originalUserQuery = rawContent;
+                        } else if (Array.isArray(rawContent) && rawContent.length > 0 && typeof rawContent[0].text === 'string') {
+                            originalUserQuery = rawContent[0].text;
+                        }
+                        logger.debug(`[MCPClient.continueConversation] OpenAI: Found original user query (index ${i}): "${originalUserQuery.substring(0,50)}..."`);
+                        break; 
+                    }
+                }
+            }
+
+            const toolName = lastMessage.name || 'the tool';
+            const imagePrompt = `The tool '${toolName}' returned an image. Based on your previous request: "${originalUserQuery.substring(0, 200)}${originalUserQuery.length > 200 ? '...':''}". Please analyze this image. You are capable of identifying elements and their pixel coordinates (x,y from top-left).`;
+            
+            const imageContentParts = this.currentLlmProviderInstance.prepareImageMessageContent(base64ImageData, mimeType, imagePrompt);
+
+            this.conversation.push({
+              role: 'user',
+              content: imageContentParts,
+              timestamp: new Date().toISOString()
+            });
+            this._trimConversationHistory();
+            logger.debug('[MCPClient.continueConversation] OpenAI: Sending image and prompt to LLM for analysis.');
+
+            const messagesForLLM_image_step = this.currentLlmProviderInstance.formatConversation(this.conversation);
+            logger.debug('[MCPClient.continueConversation] OpenAI: Messages being sent for image analysis:', JSON.stringify(messagesForLLM_image_step, null, 2));
+            const response_image_step = await this.currentLlmProviderInstance.sendMessage(messagesForLLM_image_step);
+            await this.handleLLMResponse(response_image_step);
+            return; // Image analysis path complete, exit continueConversation
+          } else {
+            logger.debug('[MCPClient.continueConversation] OpenAI: Last tool result did not contain an image. Proceeding with standard continuation.');
+            // Fall through to the general OpenAI message sending if no image in the tool result
+          }
+        } else {
+           logger.debug('[MCPClient.continueConversation] OpenAI: Last message not a tool result, or conversation empty. Proceeding with standard continuation.');
+           // Fall through to the general OpenAI message sending
         }
+        // Standard continuation for OpenAI if no image was detected in the *last tool message*
+        // This will be reached if the last message wasn't a tool message, or if the tool message had no image.
         this._trimConversationHistory();
         const messagesForLLM = this.currentLlmProviderInstance.formatConversation(this.conversation);
         response = await this.currentLlmProviderInstance.sendMessage(messagesForLLM);
-      } else if (this.config.llmProvider === 'deepseek') {
-        if (!this.currentLlmProviderInstance) {
-            logger.warn("DeepSeek provider instance not available in continueConversation. Attempting re-initialization.");
-            const currentDeepSeekModel = this.deepseekModel || process.env.DEEPSEEK_MODEL || 'deepseek-chat';
-            if (!this.setLLMProvider('deepseek', currentDeepSeekModel, true)) {
-                throw new Error("DeepSeek provider instance failed to re-initialize. Please use /setprovider deepseek [model_name].");
-            }
-            logger.info("Successfully re-initialized DeepSeek provider instance in continueConversation.");
-        }
-        this._trimConversationHistory();
-        const messagesForLLM = this.currentLlmProviderInstance.formatConversation(this.conversation);
-        response = await this.currentLlmProviderInstance.sendMessage(messagesForLLM);
+        await this.handleLLMResponse(response); // Call handleLLMResponse for the general continuation
+        return; // OpenAI path is now complete.
       } else if (this.config.llmProvider === 'google') {
         if (!this.currentLlmProviderInstance) {
              logger.warn("Google provider instance not available in continueConversation. Attempting to re-initialize.");
@@ -995,58 +1188,12 @@ export class MCPClient {
         }
         return; // Google path handles its own calls to handleLLMResponse and returns early.
       }
-      // The following call to handleLLMResponse is for Anthropic and OpenAI, 
-      // or if Google path somehow didn't return early (which it now does).
-      if (this.config.llmProvider !== 'google') { 
+      // The following call to handleLLMResponse is for Anthropic and DeepSeek (if it uses a similar pattern),
+      // and potentially others if not handled by specific blocks above.
+      // OpenAI and Google paths now have explicit returns or their own handleLLMResponse calls within their blocks.
+      if (this.config.llmProvider !== 'google' && this.config.llmProvider !== 'openai') { 
         await this.handleLLMResponse(response);
       }
-
-      // --- OpenAI Two-Step Image Handling ---
-      if (this.config.llmProvider === 'openai') {
-        const lastToolMessageIndex = this.conversation.length - (response && response.choices && response.choices[0] && response.choices[0].message && response.choices[0].message.tool_calls ? 3 : 2);
-        const lastToolMessage = this.conversation[lastToolMessageIndex];
-        
-        if (lastToolMessage && lastToolMessage.role === 'tool') {
-          const { base64ImageData, mimeType } = this.currentLlmProviderInstance.extractImageFromToolResult(lastToolMessage.content);
-
-          if (base64ImageData && mimeType) {
-            logger.info('[MCPClient.continueConversation] OpenAI: Image detected in last tool result. Preparing to send image to LLM.');
-            
-            let originalUserQuery = "Describe the image."; // Default prompt
-            // Look back for the user message that triggered the tool call
-            // History: ..., UserQueryForTool, AssistantToolCall, ToolResult (lastToolMessage), AssistantResponseToToolSummary, (New UserImageMsg)
-            // We want UserQueryForTool which is at lastToolMessageIndex - 2
-            const userMessageIndex = lastToolMessageIndex - 2;
-            if (userMessageIndex >= 0 && this.conversation[userMessageIndex] && this.conversation[userMessageIndex].role === 'user') {
-              const rawContent = this.conversation[userMessageIndex].content;
-              if (typeof rawContent === 'string') {
-                originalUserQuery = rawContent;
-              } else if (Array.isArray(rawContent) && rawContent.length > 0 && typeof rawContent[0].text === 'string') {
-                originalUserQuery = rawContent[0].text; // Take the first text part if it was a multi-part user message
-              }
-            }
-
-            const toolName = lastToolMessage.name || 'the tool';
-            const imagePrompt = `The tool '${toolName}' returned an image. Based on your previous request: "${originalUserQuery.substring(0, 200)}${originalUserQuery.length > 200 ? '...':''}", please analyze this image.`;
-            
-            const imageContentParts = this.currentLlmProviderInstance.prepareImageMessageContent(base64ImageData, mimeType, imagePrompt);
-
-            this.conversation.push({
-              role: 'user',
-              content: imageContentParts,
-              timestamp: new Date().toISOString()
-            });
-            this._trimConversationHistory();
-            logger.debug('[MCPClient.continueConversation] OpenAI: Sending image and prompt to LLM.');
-
-            const messagesForLLM_step2 = this.currentLlmProviderInstance.formatConversation(this.conversation);
-            const response_step2 = await this.currentLlmProviderInstance.sendMessage(messagesForLLM_step2);
-            await this.handleLLMResponse(response_step2);
-            return; // Exit after handling the image message response
-          }
-        }
-      }
-      // --- End OpenAI Two-Step Image Handling ---
 
     } catch (error) {
       logger.error(`Error continuing conversation: ${error.message}`);

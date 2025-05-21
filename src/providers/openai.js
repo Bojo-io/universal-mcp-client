@@ -45,6 +45,25 @@ export class OpenAIProvider extends BaseProvider {
             return value;
         }, 2));
 
+        // Check if the mcpToolResult object contains an image.
+        // Use logic similar to extractImageFromToolResult but operate on mcpToolResult directly.
+        let hasImage = false;
+        if (mcpToolResult && typeof mcpToolResult === 'object' && mcpToolResult !== null) {
+            if (mcpToolResult.image && typeof mcpToolResult.image.base64Data === 'string' && mcpToolResult.image.mimeType) {
+                hasImage = true;
+            } else if (mcpToolResult.content && Array.isArray(mcpToolResult.content)) {
+                if (mcpToolResult.content.some(p => p.type === 'image' && p.data && typeof p.data === 'string' && p.mimeType)) {
+                    hasImage = true;
+                }
+            }
+        }
+
+        if (hasImage) {
+            this.logger.debug(`[OpenAIProvider._convertToolResult] Tool result for '${toolName}' contains image data. Returning neutral placeholder.`);
+            return "Tool execution was successful. Output includes image data, which will be processed separately if applicable by the client.";
+        }
+
+        // If no image, proceed with existing summarization logic
         if (typeof mcpToolResult === 'string') return mcpToolResult;
 
         if (mcpToolResult && mcpToolResult.content && Array.isArray(mcpToolResult.content)) {
@@ -169,13 +188,62 @@ export class OpenAIProvider extends BaseProvider {
                                     url: `data:${part.source.media_type};base64,${part.source.data}`,
                                 },
                             });
-                            this.logger.debug(`[OpenAIProvider.formatConversation] Converted Anthropic image (type: ${part.source.media_type}) to OpenAI image_url.`);
+                            this.logger.debug(`[OpenAIProvider.formatConversation] Converted direct Anthropic image in user message to OpenAI image_url.`);
                         } else if (part.type === 'image_mcp' && part.source && part.source.media_type && part.source.data) {
-                            // OpenAIProvider should IGNORE image_mcp, as its images are primarily handled by 
-                            // MCPClient.continueConversation's specific OpenAI image path which creates an image_url directly.
-                            // This image_mcp in history is for other providers if a switch occurs.
-                            this.logger.debug(`[OpenAIProvider.formatConversation] Ignoring image_mcp part; OpenAI handles its tool images via a dedicated flow.`);
-                            // No push to newContentArray for image_mcp
+                            newContentArray.push({
+                                type: 'image_url',
+                                image_url: {
+                                    url: `data:${part.source.media_type};base64,${part.source.data}`,
+                                },
+                            });
+                            this.logger.debug(`[OpenAIProvider.formatConversation] Converted image_mcp in user message to OpenAI image_url.`);
+                        } else if (part.type === 'tool_result' && part.tool_use_id && typeof part.content !== 'undefined') {
+                            this.logger.debug(`[OpenAIProvider.formatConversation] Processing Anthropic-style 'tool_result' part within user message's content array (tool_use_id: ${part.tool_use_id}).`);
+                            const actualToolResultContent = part.content; 
+                            let hasImageInThisToolResult = false;
+                            let tempImagePartForOpenAI = null;
+                            const tempTextPartsForOpenAI = [];
+
+                            if (Array.isArray(actualToolResultContent)) {
+                                for (const innerBlock of actualToolResultContent) {
+                                    if (innerBlock.type === 'image' && innerBlock.source &&
+                                        innerBlock.source.type === 'base64' &&
+                                        typeof innerBlock.source.media_type === 'string' &&
+                                        typeof innerBlock.source.data === 'string') {
+                                        hasImageInThisToolResult = true;
+                                        tempImagePartForOpenAI = {
+                                            type: 'image_url',
+                                            image_url: { url: `data:${innerBlock.source.media_type};base64,${innerBlock.source.data}` }
+                                        };
+                                        this.logger.debug(`[OpenAIProvider.formatConversation] Found image in nested Anthropic tool_result. Prepared image_url part.`);
+                                    } else if (innerBlock.type === 'text' && typeof innerBlock.text === 'string') {
+                                        tempTextPartsForOpenAI.push(innerBlock.text);
+                                    }
+                                }
+                            } else if (typeof actualToolResultContent === 'object' && actualToolResultContent !== null && actualToolResultContent.type === 'image' && actualToolResultContent.source && actualToolResultContent.source.type === 'base64') {
+                                // Handle if actualToolResultContent is a single image object (less common from current AnthropicProvider.convertToolResult)
+                                hasImageInThisToolResult = true;
+                                tempImagePartForOpenAI = {
+                                    type: 'image_url',
+                                    image_url: { url: `data:${actualToolResultContent.source.media_type};base64,${actualToolResultContent.source.data}` }
+                                };
+                                this.logger.debug(`[OpenAIProvider.formatConversation] Found single image object in nested Anthropic tool_result. Prepared image_url part.`);
+                            } else if (typeof actualToolResultContent === 'string') {
+                                tempTextPartsForOpenAI.push(actualToolResultContent);
+                            }
+
+                            if (hasImageInThisToolResult && tempImagePartForOpenAI) {
+                                const combinedText = tempTextPartsForOpenAI.join('\n');
+                                const explicitPrompt = `A previous operation returned an image. Original information: "${combinedText}". The image is provided here. Please analyze it if relevant to the current or next user query. You are capable of identifying elements and their pixel coordinates (x,y from top-left).`;
+                                newContentArray.push({ type: 'text', text: explicitPrompt });
+                                newContentArray.push(tempImagePartForOpenAI);
+                                this.logger.info(`[OpenAIProvider.formatConversation] Converted Anthropic tool_result with image into an explicit OpenAI user message with image and prompt.`);
+                            } else if (tempTextPartsForOpenAI.length > 0) {
+                                // Only text, no image from this tool_result part
+                                newContentArray.push({ type: 'text', text: `(Tool ${part.tool_use_id} result: ${tempTextPartsForOpenAI.join('\n')})` });
+                            } else {
+                                newContentArray.push({ type: 'text', text: `(Tool ${part.tool_use_id} provided a result of unhandled structure or empty.)`});
+                            }
                         } else {
                             this.logger.warn(`[OpenAIProvider.formatConversation] Skipping unknown/incomplete part in user message content array: ${JSON.stringify(part).substring(0,100)}`);
                         }
@@ -215,13 +283,61 @@ export class OpenAIProvider extends BaseProvider {
                     formattedMessages.push(assistantMessagePayload);
                 }
             } else if (message.role === 'tool') {
-                // Ensure only role, tool_call_id, name, and content are passed for tool messages
+                // ALWAYS push the 'tool' role message to satisfy OpenAI's API structure requirement.
+                // The content will be the string summary (placeholder if an image was present in the original tool result).
                 formattedMessages.push({
                     role: 'tool',
                     tool_call_id: message.tool_call_id,
-                    // name: message.name, // OpenAI's 'tool' role does not use 'name' at the top level here; it's part of the preceding assistant tool_call
                     content: this._convertToolResultForOpenAI(message.content, message.name) 
                 });
+
+                // THEN, if the original tool message did contain an image, 
+                // ALSO push the synthetic 'user' message with the image for analysis.
+                const { base64ImageData, mimeType } = this.extractImageFromToolResult(message.content);
+
+                if (base64ImageData && mimeType) {
+                    this.logger.info(`[OpenAIProvider.formatConversation] Historical tool result (name: ${message.name}, ID: ${message.tool_call_id}) also contained an image. Adding synthetic user message for OpenAI to analyze this image.`);
+
+                    let textualContentFromToolResult = `Image captured by tool '${message.name}'.`; // Default
+                    if (message.content && Array.isArray(message.content.content)) { // Standard MCP multipart style
+                        const textPart = message.content.content.find(p => p.type === 'text');
+                        if (textPart && textPart.text) {
+                            textualContentFromToolResult = textPart.text;
+                        }
+                    } else if (typeof message.content === 'string') {
+                        textualContentFromToolResult = message.content;
+                    } else if (message.content && typeof message.content === 'object') {
+                        const commonTextFields = ['text', 'summary', 'description', 'message'];
+                        for (const field of commonTextFields) {
+                            if (typeof message.content[field] === 'string') {
+                                textualContentFromToolResult = message.content[field];
+                                break;
+                            }
+                        }
+                        if (textualContentFromToolResult === `Image captured by tool '${message.name}'.`) { // If still default
+                            const tempObj = {...message.content};
+                            delete tempObj.image; delete tempObj.base64Data; delete tempObj.data; delete tempObj.content;
+                            if (Object.keys(tempObj).length > 0) {
+                                try {
+                                    textualContentFromToolResult = JSON.stringify(tempObj);
+                                } catch (e) { /* ignore stringify error */ }
+                            }
+                        }
+                    }
+                    
+                    const imagePrompt = `The tool '${message.name}' (called with ID: ${message.tool_call_id || 'N/A'}) previously returned an image, and its summary has just been provided. Original textual information from tool: "${textualContentFromToolResult.substring(0,150)}${textualContentFromToolResult.length > 150 ? '...' : ''}". This image is now being provided separately. Please analyze it and use this information if it's relevant to the ongoing conversation or the latest user query. You are capable of identifying elements and their pixel coordinates (x,y from top-left).`;
+                    
+                    const imageMessageContent = [
+                        { type: 'text', text: imagePrompt },
+                        {
+                            type: 'image_url',
+                            image_url: {
+                                url: `data:${mimeType};base64,${base64ImageData}`,
+                            },
+                        },
+                    ];
+                    formattedMessages.push({ role: 'user', content: imageMessageContent });
+                }
             }
         }
         this.logger.debug('[OpenAIProvider.formatConversation] Formatted messages:', JSON.stringify(formattedMessages, null, 2));

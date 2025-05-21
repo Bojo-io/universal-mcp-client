@@ -207,6 +207,48 @@ export class GoogleProvider extends BaseProvider {
                 // For startChat history, function responses should be in a message with role: 'function'
                 chatHistoryForGoogle.push({ role: 'function', parts: [functionResponsePart] });
                 this.logger.debug(`[GoogleProvider.formatConversation] Added MCP tool result for '${message.name}' as a Google 'function' role turn to chat history.`);
+
+                // ADDITION: If this tool result also contained an image, add a user message with the image
+                const { base64ImageData, mimeType } = this.extractImageFromToolResult(message.content);
+                if (base64ImageData && mimeType) {
+                    this.logger.info(`[GoogleProvider.formatConversation] Historical tool result (name: ${message.name}, ID: ${message.tool_call_id}) also contained an image. Adding synthetic user message for Google to analyze this image during startChat.`);
+                    
+                    let textualContentFromToolResult = `Image captured by tool '${message.name}'.`; // Default summary
+                    if (message.content && Array.isArray(message.content.content)) { // Standard MCP multipart style
+                        const textPart = message.content.content.find(p => p.type === 'text');
+                        if (textPart && textPart.text) {
+                            textualContentFromToolResult = textPart.text;
+                        }
+                    } else if (typeof message.content === 'string') {
+                        textualContentFromToolResult = message.content;
+                    } else if (message.content && typeof message.content === 'object') {
+                        const commonTextFields = ['text', 'summary', 'description', 'message'];
+                        for (const field of commonTextFields) {
+                            if (typeof message.content[field] === 'string') {
+                                textualContentFromToolResult = message.content[field];
+                                break;
+                            }
+                        }
+                         if (textualContentFromToolResult === `Image captured by tool '${message.name}'.`) { // If still default
+                            const tempObj = {...message.content};
+                            delete tempObj.image; delete tempObj.base64Data; delete tempObj.data; delete tempObj.content;
+                            if (Object.keys(tempObj).length > 0) {
+                                try {
+                                    textualContentFromToolResult = JSON.stringify(tempObj);
+                                } catch (e) { /* ignore stringify error */ }
+                            }
+                        }
+                    }
+
+                    const imagePrompt = `The tool '${message.name}' (called with ID: ${message.tool_call_id || 'N/A'}) previously returned an image. The summary of that tool call has just been provided in the history. Original textual information from tool: "${textualContentFromToolResult.substring(0,150)}${textualContentFromToolResult.length > 150 ? '...' : ''}". This image is now being provided. Please analyze it and use this information if it's relevant to the ongoing conversation or the latest user query.`;
+                    
+                    const userImageMessageParts = [
+                        { text: imagePrompt }, 
+                        { inlineData: { mimeType: mimeType, data: base64ImageData } }
+                    ];
+                    chatHistoryForGoogle.push({ role: 'user', parts: userImageMessageParts });
+                    this.logger.debug(`[GoogleProvider.formatConversation] Added synthetic user message with image from tool '${message.name}' to Google startChat history.`);
+                }
             }
         }
         this.logger.debug("[GoogleProvider.formatConversation] Constructed history for startChat/reconfigure:", JSON.stringify(chatHistoryForGoogle, null, 2));
