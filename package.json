@@ -22,5 +22,33 @@
     "openai": "^4.87.4"
   },
   "author": "Justin Bojarski",
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bojo-io/universal-mcp-client"
+  },
+  "keywords": [
+          "mcp",
+          "model context protocol",
+          "llm",
+          "cli",
+          "ai",
+          "anthropic",
+          "openai",
+          "google",
+          "gemini",
+          "deepseek",
+          "tool calling"
+        ],
+  "bugs": {
+    "url": "https://github.com/Bojo-io/universal-mcp-client/issues"
+  },
+  "homepage": "https://github.com/Bojo-io/universal-mcp-client#readme",
+  "files": [
+    "src/**/*.js",
+    "README.md",
+    "LICENSE",
+    "config.json.example",
+    ".env.example"
+  ]
 }

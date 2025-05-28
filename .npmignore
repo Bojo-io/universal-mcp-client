@@ -1,0 +1,7 @@
+.git/
+.github/
+node_modules/
+.env
+*.log
+temp/
+config.json

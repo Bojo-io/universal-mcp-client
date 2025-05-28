@@ -54,6 +54,7 @@ import { GoogleProvider } from './providers/google.js';
 import { AnthropicProvider } from './providers/anthropic.js'; 
 import { OpenAIProvider } from './providers/openai.js';    
 import { DeepSeekProvider } from './providers/deepseek.js';
+import { HuggingFaceProvider } from './providers/huggingface.js';
 
 const require = createRequire(import.meta.url);
 
@@ -136,6 +137,8 @@ export class MCPClient {
     this.openaiModel = null; // For OpenAI display
     this.geminiModel = null; // For Google display
     this.deepseekModel = null; // For DeepSeek display
+    this.huggingfaceModel = null; // For HuggingFace display
+    this.huggingfacePartnerName = null; // Store the active partner name
 
     // Determine initial provider and model from config and environment variables
     const configuredProviderName = config.llmProvider?.toLowerCase();
@@ -149,21 +152,30 @@ export class MCPClient {
       modelForProvider = process.env.GOOGLE_GEMINI_MODEL || 'gemini-2.5-flash-preview-04-17';
     } else if (configuredProviderName === 'deepseek') {
       modelForProvider = process.env.DEEPSEEK_MODEL || 'deepseek-chat';
+    } else if (configuredProviderName === 'huggingface') {
+        // For huggingface, model and partner are typically set together
+        // config.json might have: "llmProvider": "huggingface", "huggingfaceModel": "some-model", "huggingfacePartnerName": "together"
+        modelForProvider = config.huggingfaceModel || process.env.HUGGINGFACE_MODEL; // e.g., meta-llama/Llama-4-Scout-17B-16E-Instruct
+        // Partner name needs to be passed to setLLMProvider
     }
     // If configuredProviderName is undefined or not one of the above, modelForProvider remains null.
     // setLLMProvider will use its own defaults if modelForProvider is null.
 
     // Attempt to set the initial LLM provider.
     // The 'true' flag for initialSetup suppresses console.error from setLLMProvider, but it still logs to logger.error.
-    const providerSuccessfullySet = this.setLLMProvider(configuredProviderName, modelForProvider, true);
+    let partnerNameForInitialSetup = null;
+    if (configuredProviderName === 'huggingface') {
+        partnerNameForInitialSetup = config.huggingfacePartnerName || process.env.HUGGINGFACE_PARTNER_NAME;
+    }
+    const providerSuccessfullySet = this.setLLMProvider(configuredProviderName, modelForProvider, true, partnerNameForInitialSetup);
 
     if (!providerSuccessfullySet) {
       // setLLMProvider would have logged the specific error (e.g. API key missing or unsupported provider name)
       // Now, make the client fail hard, preventing it from starting in a broken state.
       throw new Error(
         `Failed to initialize the configured LLM provider "${config.llmProvider}". ` +
-        `Please check your 'config.json', ensure the provider name is valid ('anthropic', 'openai', 'google', 'deepseek'), ` +
-        `and that the required API key (e.g., ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_GEMINI_API_KEY, DEEPSEEK_API_KEY) is set in your environment. ` +
+        `Please check your 'config.json', ensure the provider name is valid ('anthropic', 'openai', 'google', 'deepseek', 'huggingface'), ` +
+        `and that the required API key (e.g., ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_GEMINI_API_KEY, DEEPSEEK_API_KEY, HUGGINGFACE_API_KEY) is set in your environment. ` +
         `Client cannot start.`
       );
     }
@@ -197,6 +209,9 @@ export class MCPClient {
       modelName = this.geminiModel;
     } else if (this.config.llmProvider === 'deepseek' && this.deepseekModel) {
       modelName = this.deepseekModel;
+    } else if (this.config.llmProvider === 'huggingface' && this.huggingfaceModel) {
+        providerName = `${this.config.llmProvider} (${this.huggingfacePartnerName})`; // Show partner name too
+        modelName = this.huggingfaceModel;
     }
     // Sanitize modelName to remove potentially problematic characters for prompt display if any
     // For now, direct usage is fine, but could add regex replace for non-alphanumeric if needed.
@@ -268,14 +283,17 @@ export class MCPClient {
 
   /**
    * Sets or switches the LLM provider and model.
-   * @param {string} newProvider The new provider ('anthropic', 'openai', or 'google').
+   * @param {string} newProvider The new provider ('anthropic', 'openai', 'google', 'deepseek', 'huggingface').
    * @param {string} [newModelName] The specific model name for the provider.
    * @param {boolean} [initialSetup=false] Flag to suppress console output during initial constructor setup.
+   * @param {string} [partnerNameValue] The Hugging Face partner name, required if newProvider is 'huggingface'.
    * @returns {boolean} True if successful, false otherwise.
    */
-  setLLMProvider(newProvider, newModelName, initialSetup = false) {
+  setLLMProvider(newProvider, newModelName, initialSetup = false, partnerNameValue = null) {
     newProvider = newProvider?.toLowerCase();
-    logger.info(`Attempting to set LLM provider to: ${newProvider}` + (newModelName ? ` with model: ${newModelName}` : ' (using default model)'));
+    logger.info(`Attempting to set LLM provider to: ${newProvider}` + 
+                (newModelName ? ` with model: ${newModelName}` : ' (using default model)') +
+                (newProvider === 'huggingface' && partnerNameValue ? ` with partner: ${partnerNameValue}` : ''));
 
     // Clear old provider's SDK specific instances if any were on MCPClient directly
     this.anthropic = null; 
@@ -289,6 +307,8 @@ export class MCPClient {
     this.openaiModel = null; 
     this.geminiModel = null;   
     this.deepseekModel = null;
+    this.huggingfaceModel = null; 
+    this.huggingfacePartnerName = null;
 
     if (newProvider === 'anthropic') {
       const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
@@ -388,8 +408,51 @@ export class MCPClient {
         if (!initialSetup) console.error(`Error: ${errorMsg}`);
         return false;
       }
+    } else if (newProvider === 'huggingface') {
+        const hfApiKey = process.env.HUGGINGFACE_API_KEY; // Use HUGGINGFACE_API_KEY
+        if (!hfApiKey) {
+            const errorMsg = 'HUGGINGFACE_API_KEY environment variable is required for HuggingFace provider.';
+            logger.error(errorMsg);
+            if (!initialSetup) console.error(`Error: ${errorMsg}`);
+            return false;
+        }
+        if (!newModelName) {
+            const errorMsg = 'Model name is required for HuggingFace provider.';
+            logger.error(errorMsg);
+            if (!initialSetup) console.error(`Error: ${errorMsg}`);
+            return false;
+        }
+        if (!partnerNameValue) {
+            const errorMsg = 'Hugging Face partner name is required for HuggingFace provider (e.g., together, nscale).';
+            logger.error(errorMsg);
+            if (!initialSetup) console.error(`Error: ${errorMsg}`);
+            return false;
+        }
+        try {
+            // For huggingface, modelName IS newModelName, and partnerName IS partnerNameValue
+            this.currentLlmProviderInstance = new HuggingFaceProvider(
+                hfApiKey, 
+                newModelName, 
+                partnerNameValue, 
+                this.systemMessage, 
+                this.getAllTools(), 
+                logger, 
+                this.conversation,
+                this.imageAnalysisPromptSuffix
+            );
+            this.huggingfaceModel = newModelName; // For display
+            this.huggingfacePartnerName = partnerNameValue; // For display and potential re-use
+            this.config.llmProvider = 'huggingface'; // Update current provider type in config
+            if (!initialSetup) console.log(`Switched to HuggingFace provider: ${this.huggingfacePartnerName} with model: ${this.huggingfaceModel}`);
+            logger.info(`Successfully set LLM provider to HuggingFace ${this.huggingfacePartnerName} with model ${this.huggingfaceModel}`);
+        } catch (error) {
+            const errorMsg = `Failed to initialize HuggingFace provider (${partnerNameValue}, model ${newModelName}): ${error.message}`;
+            logger.error(errorMsg);
+            if (!initialSetup) console.error(`Error: ${errorMsg}`);
+            return false;
+        }
     } else {
-      const errorMsg = `Unsupported LLM provider: ${newProvider}. Supported: 'anthropic', 'openai', 'google', 'deepseek'.`;
+      const errorMsg = `Unsupported LLM provider: ${newProvider}. Supported: 'anthropic', 'openai', 'google', 'deepseek', 'huggingface'.`;
       logger.error(errorMsg);
       if (!initialSetup && newProvider) console.error(`Error: ${errorMsg}`);
       else if (!initialSetup && !newProvider) console.info ('No LLM provider specified in command.');
@@ -628,6 +691,7 @@ export class MCPClient {
                  this.config.llmProvider === 'openai' ? ` (${this.openaiModel})` : 
                  this.config.llmProvider === 'google' ? ` (${this.geminiModel})` : 
                  this.config.llmProvider === 'deepseek' ? ` (${this.deepseekModel})` : 
+                 this.config.llmProvider === 'huggingface' ? ` (${this.huggingfacePartnerName} - ${this.huggingfaceModel})` :
                  ' (None)'));
     console.log('Type your questions or instructions. Type /help for available commands.');
     
@@ -647,8 +711,10 @@ export class MCPClient {
         console.log('  /exit, /quit         - Exit the client.');
         console.log('  /clear               - Clear the conversation history.');
         console.log('  /setsystem <message> - Set a new system message for the LLM.');
-        console.log('  /setprovider <name> [model] - Switch LLM provider (e.g., /setprovider google gemini-2.5-flash-preview-04-17).');
-        console.log('                         Supported providers: anthropic, openai, google, deepseek.');
+        console.log('  /setprovider <name> [model_or_partner] [partner_if_huggingface] - Switch LLM provider.');
+        console.log('                         Examples: /setprovider openai gpt-4o');
+        console.log('                                   /setprovider huggingface meta-llama/Llama-3-8B-Instruct together');
+        console.log('                         Supported providers: anthropic, openai, google, deepseek, huggingface.');
         console.log('  /help                - Show this help message.');
         console.log('  /setimagepromptsuffix <suffix> - Set the suffix for image analysis prompts.');
         this.rl.prompt();
@@ -698,13 +764,28 @@ export class MCPClient {
       if (input.startsWith('/setprovider')) {
         const parts = input.split(' ').slice(1);
         const provider = parts[0]?.toLowerCase();
-        const modelName = parts[1];
-        if (provider) {
-          this.setLLMProvider(provider, modelName);
+        let modelName = null;
+        let partnerName = null;
+
+        if (provider === 'huggingface') {
+            if (parts.length < 3) {
+                console.error('Usage: /setprovider huggingface <model_id> <partner_name>');
+                console.error('Example: /setprovider huggingface meta-llama/Llama-3-8B-Instruct together');
+            } else {
+                modelName = parts[1]; // For huggingface, parts[1] is model_id
+                partnerName = parts[2]; // parts[2] is the partner_name
+            }
         } else {
-          console.error('Usage: /setprovider <provider_name> [model_name]');
-          console.error('Supported providers: anthropic, openai, google, deepseek');
+            modelName = parts[1]; // For other providers, parts[1] is model_name (optional)
         }
+        
+        if (provider && (provider !== 'huggingface' || (modelName && partnerName))) {
+          this.setLLMProvider(provider, modelName, false, partnerName);
+        } else if (provider !== 'huggingface') { // If not huggingface and not enough args for it
+          console.error('Usage: /setprovider <provider_name> [model_name]');
+          console.error('Supported providers: anthropic, openai, google, deepseek, huggingface.');
+        }
+        // Error for huggingface is handled within the if block above
         this.rl.prompt();
         return;
       }
@@ -820,6 +901,24 @@ export class MCPClient {
         this._trimConversationHistory();
         const messagesForLLM = this.currentLlmProviderInstance.formatConversation(this.conversation);
         response = await this.currentLlmProviderInstance.sendMessage(messagesForLLM);
+      } else if (this.config.llmProvider === 'huggingface') {
+        if (!this.currentLlmProviderInstance) {
+            logger.warn("HuggingFace provider instance not available in processQuery. Attempting re-initialization.");
+            // Re-initialization needs model and partner name.
+            // These should ideally be stored on `this` if a successful setLLMProvider occurred.
+            const currentModel = this.huggingfaceModel || process.env.HUGGINGFACE_MODEL;
+            const currentPartner = this.huggingfacePartnerName || process.env.HUGGINGFACE_PARTNER_NAME;
+            if (!currentModel || !currentPartner) {
+                 throw new Error("HuggingFace model or partner name not available for re-initialization. Please use /setprovider huggingface <model_id> <partner_name>.");
+            }
+            if (!this.setLLMProvider('huggingface', currentModel, true, currentPartner)) {
+                throw new Error("HuggingFace provider instance failed to re-initialize.");
+            }
+            logger.info(`Successfully re-initialized HuggingFace provider (${currentPartner} - ${currentModel}) instance in processQuery.`);
+        }
+        this._trimConversationHistory();
+        const messagesForLLM_hf = this.currentLlmProviderInstance.formatConversation(this.conversation);
+        response = await this.currentLlmProviderInstance.sendMessage(messagesForLLM_hf);
       }
       await this.handleLLMResponse(response);
     } catch (error) {
@@ -880,30 +979,24 @@ export class MCPClient {
     let textContent = '';
     let toolCalls = null;
 
-    if (this.config.llmProvider === 'anthropic') {
-      if (!this.currentLlmProviderInstance) {
-        throw new Error("Anthropic provider instance not found in handleLLMResponse.");
-      }
-      textContent = this.currentLlmProviderInstance.extractTextContent(response);
-      toolCalls = this.currentLlmProviderInstance.extractToolCalls(response);
-    } else if (this.config.llmProvider === 'openai') {
-      if (!this.currentLlmProviderInstance) {
-        throw new Error("OpenAI provider instance not found in handleLLMResponse.");
-      }
-      textContent = this.currentLlmProviderInstance.extractTextContent(response);
-      toolCalls = this.currentLlmProviderInstance.extractToolCalls(response);
-    } else if (this.config.llmProvider === 'google') {
-      if (!this.currentLlmProviderInstance) {
-        throw new Error("Google provider instance not found in handleLLMResponse. This indicates a critical setup error.");
-      }
-      textContent = this.currentLlmProviderInstance.extractTextContent(response);
-      toolCalls = this.currentLlmProviderInstance.extractToolCalls(response);
-    } else if (this.config.llmProvider === 'deepseek') {
-      if (!this.currentLlmProviderInstance) {
-        throw new Error("DeepSeek provider instance not found in handleLLMResponse.");
-      }
-      textContent = this.currentLlmProviderInstance.extractTextContent(response);
-      toolCalls = this.currentLlmProviderInstance.extractToolCalls(response);
+    if (!this.currentLlmProviderInstance) {
+        logger.error(`[MCPClient.handleLLMResponse] No current LLM provider instance found for provider type: ${this.config.llmProvider}. This is a critical error.`);
+        // Potentially add a generic error message to conversation or throw.
+        // For now, logging and attempting to proceed (though it will likely fail if provider methods are called).
+        // If an error is thrown here, it might prevent the CLI from prompting again.
+        this.conversation.push({ role: 'assistant', content: "Error: LLM Provider instance is missing. Please try /setprovider again."});
+        console.error("Error: LLM Provider instance is missing. Cannot process LLM response.");
+        return; // Exit to prevent further errors from missing provider methods
+    }
+
+    try {
+        textContent = this.currentLlmProviderInstance.extractTextContent(response);
+        toolCalls = this.currentLlmProviderInstance.extractToolCalls(response);
+    } catch (e) {
+        logger.error(`[MCPClient.handleLLMResponse] Error extracting content or tool calls from ${this.config.llmProvider} provider: ${e.message}`, e.stack);
+        this.conversation.push({ role: 'assistant', content: `Error processing LLM response: ${e.message}`});
+        console.error(`Error processing LLM response: ${e.message}`);
+        return; // Exit if extraction fails
     }
     
     this.conversation.push({ role: 'assistant', content: textContent, tool_calls: toolCalls });
@@ -911,7 +1004,7 @@ export class MCPClient {
 
     if (toolCalls && toolCalls.length > 0) {
       for (const toolCall of toolCalls) {
-        let toolResultForAugmentation = null; // Variable to store the result for later augmentation
+        let toolResultForAugmentation = null; 
         try {
           if (this.logToolCallVerbosity === 'minimal' || this.logToolCallVerbosity === 'default' || this.logToolCallVerbosity === 'debug') {
             console.log(`\nExecuting tool: ${toolCall.name}...`);
@@ -922,7 +1015,7 @@ export class MCPClient {
           if (!serverName) throw new Error(`No server found for tool: ${toolCall.name}`);
           
           const result = await this.callTool(serverName, toolCall.name, toolCall.args);
-          toolResultForAugmentation = result; // Store the result
+          toolResultForAugmentation = result; 
           
           logger.info('Raw tool result from this.callTool in MCPClient:', JSON.stringify(result, null, 2));
           
@@ -933,82 +1026,34 @@ export class MCPClient {
             content: result 
           });
 
-          // Display the result based on verbosity settings
           if (this.logToolCallVerbosity === 'default' || this.logToolCallVerbosity === 'debug') {
             console.log('Tool result:');
-
-            // --- BEGIN ADDED DEBUG LOGGING ---
-            if (typeof result === 'object' && result !== null && !this.logToolResultsBase64Full) {
-              logger.debug('[MCPClient.handleLLMResponse] BEFORE truncation: Checking result object for base64 content.');
-              if (result.image && typeof result.image.base64Data === 'string') {
-                logger.debug(`[MCPClient.handleLLMResponse] BEFORE truncation: result.image.base64Data length: ${result.image.base64Data.length}`);
-              }
-              if (result.content && Array.isArray(result.content)) {
-                result.content.forEach((part, index) => {
-                  if (part.type === 'image' && typeof part.data === 'string') {
-                    logger.debug(`[MCPClient.handleLLMResponse] BEFORE truncation: result.content[${index}] (image part) data length: ${part.data.length}`);
-                  }
-                });
-              }
-            }
-            // --- END ADDED DEBUG LOGGING ---
-
             const resultToLog = this.logToolResultsBase64Full ? result : this._truncateBase64InObject(result);
-
-            // --- BEGIN ADDED DEBUG LOGGING ---
-            if (typeof resultToLog === 'object' && resultToLog !== null && !this.logToolResultsBase64Full) {
-              logger.debug('[MCPClient.handleLLMResponse] AFTER truncation: Checking resultToLog object for base64 content.');
-              if (resultToLog.image && typeof resultToLog.image.base64Data === 'string') {
-                logger.debug(`[MCPClient.handleLLMResponse] AFTER truncation: resultToLog.image.base64Data (string check): ${resultToLog.image.base64Data.substring(0, Math.min(70, resultToLog.image.base64Data.length))}...`);
-              }
-               if (resultToLog.base64Data && typeof resultToLog.base64Data === 'string') { // Check if root object has base64Data
-                logger.debug(`[MCPClient.handleLLMResponse] AFTER truncation: resultToLog.base64Data (string check): ${resultToLog.base64Data.substring(0, Math.min(70, resultToLog.base64Data.length))}...`);
-              }
-              if (resultToLog.content && Array.isArray(resultToLog.content)) {
-                resultToLog.content.forEach((part, index) => {
-                  if (part.type === 'image' && typeof part.data === 'string') {
-                    logger.debug(`[MCPClient.handleLLMResponse] AFTER truncation: resultToLog.content[${index}] (image part) data: ${part.data.substring(0, Math.min(70, part.data.length))}...`);
-                  } else if (part.type === 'image_url' && part.image_url && typeof part.image_url.url === 'string') {
-                     logger.debug(`[MCPClient.handleLLMResponse] AFTER truncation: resultToLog.content[${index}] (image_url part) url: ${part.image_url.url.substring(0, Math.min(100, part.image_url.url.length))}...`);
-                  }
-                });
-              }
-            }
-             logger.debug(`[MCPClient.handleLLMResponse] Final resultToLog type: ${typeof resultToLog}`);
-            // --- END ADDED DEBUG LOGGING ---
-            
+            logger.debug(`[MCPClient.handleLLMResponse] Final resultToLog type: ${typeof resultToLog}`);
             if (this.logToolCallVerbosity === 'debug') {
-                // For debug mode, always log the potentially truncated full object
                 console.log(JSON.stringify(resultToLog, null, 2));
-            } else { // 'default' verbosity
+            } else { 
                 if (typeof resultToLog === 'string') console.log(resultToLog);
                 else if (resultToLog && resultToLog.content && Array.isArray(resultToLog.content)) {
                   const textPart = resultToLog.content.find(p => p.type === 'text');
-                  if (textPart) console.log(textPart.text); // Prints only text for multi-part
-                  else console.log(JSON.stringify(resultToLog.content, null, 2)); // Prints content array if no text part
+                  if (textPart) console.log(textPart.text); 
+                  else console.log(JSON.stringify(resultToLog.content, null, 2)); 
                 } 
-                else console.log(JSON.stringify(resultToLog, null, 2)); // Prints whole object if not string/multi-part
+                else console.log(JSON.stringify(resultToLog, null, 2)); 
             }
-          } else if (this.logToolCallVerbosity === 'minimal') {
-            // Optionally, log a very brief confirmation like "Tool execution completed." or nothing more.
-            // For now, minimal means only the "Executing tool..." message.
           }
           
-          await this.continueConversation(); // Let the current provider continue with the tool result
+          await this.continueConversation();
 
         } catch (error) {
           logger.error(`Error executing tool ${toolCall.name}: ${error.message}`);
           console.error(`Tool error: ${error.message}`);
           this.conversation.push({ role: 'tool', tool_call_id: toolCall.id, name: toolCall.name, content: JSON.stringify({ error: error.message }) });
-          await this.continueConversation(); // Still attempt to continue so LLM can respond to the error
+          await this.continueConversation(); 
         }
 
-        // AFTER continueConversation, add the synthetic user message if an image was in the tool result
         if (toolResultForAugmentation) {
           const extractedImage = this._extractImageFromMcpToolResult(toolResultForAugmentation);
-          // Only add synthetic image_mcp message for providers that DON'T have robust internal handling
-          // for images within tool results or dedicated multi-step flows (like OpenAI/Google).
-          // Anthropic can handle images directly in its tool_result content.
           const providersToExcludeImageMcpAugmentation = ['openai', 'anthropic', 'google'];
           if (!providersToExcludeImageMcpAugmentation.includes(this.config.llmProvider) &&
               extractedImage && extractedImage.base64Data && extractedImage.mimeType) {
@@ -1016,10 +1061,10 @@ export class MCPClient {
               role: 'user',
               content: [
                 {
-                  type: 'image_mcp', // Standardized internal type for cross-provider compatibility
+                  type: 'image_mcp', 
                   source: {
                     media_type: extractedImage.mimeType,
-                    data: extractedImage.base64Data // Raw base64
+                    data: extractedImage.base64Data 
                   }
                 },
                 {
@@ -1042,195 +1087,142 @@ export class MCPClient {
   async continueConversation() {
     try {
       let response;
-      const allTools = this.getAllTools();
-      if (this.config.llmProvider === 'anthropic') {
-        if (!this.currentLlmProviderInstance) {
-            logger.warn("Anthropic provider instance not available in continueConversation. Attempting re-initialization.");
-            const currentAnthropicModel = this.model || process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-latest';
-            if (!this.setLLMProvider('anthropic', currentAnthropicModel, true)) {
-                throw new Error("Anthropic provider instance failed to re-initialize. Please use /setprovider anthropic [model_name].");
-            }
-            logger.info("Successfully re-initialized Anthropic provider instance in continueConversation.");
+
+      if (!this.currentLlmProviderInstance) {
+        logger.error(`[MCPClient.continueConversation] No current LLM provider instance found for provider type: ${this.config.llmProvider}. This is a critical error.`);
+        this.conversation.push({ role: 'assistant', content: "Error: LLM Provider instance is missing for continuation. Please try /setprovider again."});
+        console.error("Error: LLM Provider instance is missing. Cannot continue conversation.");
+        return; 
+      }
+      
+      const providerType = this.config.llmProvider;
+
+      // Generic re-initialization check (excluding Google as it has special handling below)
+      if (providerType !== 'google' && !this.currentLlmProviderInstance) {
+        logger.warn(`Provider instance for ${providerType} not available in continueConversation. Attempting re-initialization.`);
+        let modelToReinit, partnerToReinit;
+        switch(providerType) {
+            case 'anthropic': modelToReinit = this.model || process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-latest'; break;
+            case 'openai': modelToReinit = this.openaiModel || process.env.OPENAI_MODEL || 'gpt-4o'; break;
+            case 'deepseek': modelToReinit = this.deepseekModel || process.env.DEEPSEEK_MODEL || 'deepseek-chat'; break;
+            case 'huggingface': 
+                modelToReinit = this.huggingfaceModel || process.env.HUGGINGFACE_MODEL;
+                partnerToReinit = this.huggingfacePartnerName || process.env.HUGGINGFACE_PARTNER_NAME;
+                if (!modelToReinit || !partnerToReinit) {
+                    throw new Error(`HuggingFace model or partner name missing for re-init in continueConversation.`);
+                }
+                break;
+            default: throw new Error(`Unhandled provider ${providerType} for re-init in continueConversation.`);
         }
-        this._trimConversationHistory();
-        const messagesForLLM = this.currentLlmProviderInstance.formatConversation(this.conversation);
-        response = await this.currentLlmProviderInstance.sendMessage(messagesForLLM);
-        
-        // Process and add LLM's response (the acknowledgement to the tool summary) to history.
-        // This ensures the acknowledgement is ALWAYS added, removing the 'skipInitialHandleLLMResponse' logic.
-        // await this.handleLLMResponse(response); // REMOVED - this was causing double processing for Anthropic
+        if (!this.setLLMProvider(providerType, modelToReinit, true, partnerToReinit)) { // partnerToReinit will be ignored if not huggingface
+            throw new Error(`${providerType} provider instance failed to re-initialize in continueConversation.`);
+        }
+        logger.info(`Successfully re-initialized ${providerType} provider instance in continueConversation.`);
+      }
 
-      } else if (this.config.llmProvider === 'openai') {
-        // Check the last message in the conversation. If it's a tool result and contains an image,
-        // then this `continueConversation` call is the one that should trigger the image analysis.
+
+      if (providerType === 'openai') {
         const lastMessage = this.conversation.length > 0 ? this.conversation[this.conversation.length - 1] : null;
-
         if (lastMessage && lastMessage.role === 'tool') {
           const { base64ImageData, mimeType } = this.currentLlmProviderInstance.extractImageFromToolResult(lastMessage.content);
-
           if (base64ImageData && mimeType) {
             logger.info('[MCPClient.continueConversation] OpenAI: Image detected in last tool result. Proceeding with image analysis.');
-            
-            let originalUserQuery = "Describe the image."; // Default prompt
+            let originalUserQuery = "Describe the image."; 
             let assistantMessageThatCalledTheTool = null;
             let indexOfAssistantMessage = -1;
-
-            // Find the assistant message that made the tool call for this image
-            for (let i = this.conversation.length - 2; i >= 0; i--) { // Start before the tool result message
+            for (let i = this.conversation.length - 2; i >= 0; i--) { 
                 const msg = this.conversation[i];
-                if (msg.role === 'assistant' && msg.tool_calls) {
-                    if (msg.tool_calls.some(tc => tc.id === lastMessage.tool_call_id)) {
-                        assistantMessageThatCalledTheTool = msg;
-                        indexOfAssistantMessage = i;
-                        logger.debug(`[MCPClient.continueConversation] OpenAI: Found assistant message (index ${i}) that called tool ${lastMessage.tool_call_id}`);
-                        break;
-                    }
+                if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.some(tc => tc.id === lastMessage.tool_call_id)) {
+                    assistantMessageThatCalledTheTool = msg; indexOfAssistantMessage = i; break;
                 }
             }
-
             if (assistantMessageThatCalledTheTool && indexOfAssistantMessage > 0) {
                 for (let i = indexOfAssistantMessage - 1; i >= 0; i--) {
                     if (this.conversation[i].role === 'user') {
                         const rawContent = this.conversation[i].content;
-                        if (typeof rawContent === 'string') {
-                            originalUserQuery = rawContent;
-                        } else if (Array.isArray(rawContent) && rawContent.length > 0 && typeof rawContent[0].text === 'string') {
-                            originalUserQuery = rawContent[0].text;
-                        }
-                        logger.debug(`[MCPClient.continueConversation] OpenAI: Found original user query (index ${i}): "${originalUserQuery.substring(0,50)}..."`);
+                        if (typeof rawContent === 'string') originalUserQuery = rawContent;
+                        else if (Array.isArray(rawContent) && rawContent.length > 0 && typeof rawContent[0].text === 'string') originalUserQuery = rawContent[0].text;
                         break; 
                     }
                 }
             }
-
             const toolName = lastMessage.name || 'the tool';
             const imagePrompt = `The tool '${toolName}' returned an image. Based on your previous request: "${originalUserQuery.substring(0, 200)}${originalUserQuery.length > 200 ? '...':''}". ${this.imageAnalysisPromptSuffix}`;
-            
             const imageContentParts = this.currentLlmProviderInstance.prepareImageMessageContent(base64ImageData, mimeType, imagePrompt);
-
-            this.conversation.push({
-              role: 'user',
-              content: imageContentParts,
-              timestamp: new Date().toISOString()
-            });
+            this.conversation.push({ role: 'user', content: imageContentParts, timestamp: new Date().toISOString() });
             this._trimConversationHistory();
-            logger.debug('[MCPClient.continueConversation] OpenAI: Sending image and prompt to LLM for analysis.');
-
             const messagesForLLM_image_step = this.currentLlmProviderInstance.formatConversation(this.conversation);
-            logger.debug('[MCPClient.continueConversation] OpenAI: Messages being sent for image analysis:', JSON.stringify(messagesForLLM_image_step, null, 2));
             const response_image_step = await this.currentLlmProviderInstance.sendMessage(messagesForLLM_image_step);
             await this.handleLLMResponse(response_image_step);
-            return; // Image analysis path complete, exit continueConversation
-          } else {
-            logger.debug('[MCPClient.continueConversation] OpenAI: Last tool result did not contain an image. Proceeding with standard continuation.');
-            // Fall through to the general OpenAI message sending if no image in the tool result
+            return; 
           }
-        } else {
-           logger.debug('[MCPClient.continueConversation] OpenAI: Last message not a tool result, or conversation empty. Proceeding with standard continuation.');
-           // Fall through to the general OpenAI message sending
         }
-        // Standard continuation for OpenAI if no image was detected in the *last tool message*
-        // This will be reached if the last message wasn't a tool message, or if the tool message had no image.
         this._trimConversationHistory();
         const messagesForLLM = this.currentLlmProviderInstance.formatConversation(this.conversation);
         response = await this.currentLlmProviderInstance.sendMessage(messagesForLLM);
-        await this.handleLLMResponse(response); // Call handleLLMResponse for the general continuation
-        return; // OpenAI path is now complete.
-      } else if (this.config.llmProvider === 'google') {
+        await this.handleLLMResponse(response); 
+        return; 
+
+      } else if (providerType === 'google') {
         if (!this.currentLlmProviderInstance) {
-             logger.warn("Google provider instance not available in continueConversation. Attempting to re-initialize.");
+             logger.warn("Google provider instance not available in continueConversation. Re-initializing.");
              const currentGoogleModelForRetry = this.geminiModel || process.env.GOOGLE_GEMINI_MODEL || 'gemini-2.5-flash-preview-04-17';
              if(!this.setLLMProvider('google', currentGoogleModelForRetry, true)) { 
-                 throw new Error("Google provider instance failed to initialize. Please use /setprovider google [model_name] again.");
+                 throw new Error("Google provider instance failed to re-initialize during continueConversation.");
             }
-            logger.info("Successfully re-initialized Google provider instance in continueConversation.");
         }
-
         const lastMessage = this.conversation[this.conversation.length - 1];
         if (lastMessage?.role !== 'tool') {
-            logger.error("Last message is not a tool response for Google continuation. This should not happen.", lastMessage);
             throw new Error("Programming error: Expected last message to be a tool response for Google continuation.");
         }
-        
-        const toolCallResult = lastMessage.content; // Raw result from client.callTool()
+        const toolCallResult = lastMessage.content; 
         const toolName = lastMessage.name;
-        const toolCallId = lastMessage.tool_call_id; // Required by some provider interfaces if they need it.
-
-        // The GoogleProvider instance will handle the two-step image process internally if needed.
-        // Its continueConversation method should accept the tool result and manage sending
-        // the FunctionResponse and potentially a follow-up image message.
-        // It should then return the final LLM response after all steps.
-        // The MCPClient's `this.conversation` is the source of truth for history passed to the provider.
-        // The provider's `continueConversation` method will get the latest state.
-
-        // The provider method needs:
-        // 1. The full conversation history (or rely on its internal synchronized history).
-        // 2. The specific tool call result that needs to be processed.
-        
-        // Let's assume `this.currentLlmProviderInstance.continueConversation` takes the tool call details
-        // and internally uses its synchronized history.
-        // It will return the Gemini SDK's response(s), and we'll call handleLLMResponse once with the final one.
-        
-        // The `GoogleProvider.continueConversation` is expected to:
-        // 1. Convert `toolCallResult` to `FunctionResponsePart` (using its `convertToolResult` method).
-        // 2. Send this `FunctionResponsePart` to Gemini.
-        // 3. Handle the LLM response to this part (internally, or return it).
-        // 4. If an image was part of `toolCallResult`, prepare and send the image part with a prompt.
-        // 5. Handle the LLM response to the image part (internally, or return it).
-        // 6. Return the *final* relevant LLM response object that MCPClient's `handleLLMResponse` can process.
-
-        // The old Google `continueConversation` already calls `handleLLMResponse` for each step.
-        // This is the key: the provider's methods should *not* call `this.handleLLMResponse`.
-        // They should return the raw SDK response, and `MCPClient` orchestrates `handleLLMResponse`.
-
-        // Revised flow for Google in MCPClient.continueConversation:
         const googleProvider = this.currentLlmProviderInstance;
-
-        // Step 1: Send FunctionResponse
-        const functionResponsePart = googleProvider.convertToolResult(toolCallResult, toolName); // Assumes method exists on provider
-        logger.debug(`[Google ContinueConversation] Step 1: Sending FunctionResponse part for ${toolName} via provider:`, JSON.stringify(functionResponsePart, null, 2));
-        
-        // Provider's sendMessage needs to handle history correctly.
-        // It should append the functionResponsePart to its *current* chat session history before sending.
-        let llmResponseStep1 = await googleProvider.sendMessage([functionResponsePart], true); // `true` to indicate it's a continuation
-        
-        // Process the LLM's reaction to the tool's structured data output
-        // This will add the assistant's response to `this.conversation`
+        const functionResponsePart = googleProvider.convertToolResult(toolCallResult, toolName); 
+        let llmResponseStep1 = await googleProvider.sendMessage([functionResponsePart], true); 
         await this.handleLLMResponse(llmResponseStep1); 
-
-        // Step 2: If the toolResult also contained an image, send it in a subsequent, separate message
-        const imageDetails = googleProvider.extractImageFromToolResult(toolCallResult); // New helper on provider
-
+        const imageDetails = googleProvider.extractImageFromToolResult(toolCallResult); 
         if (imageDetails.base64ImageData && imageDetails.mimeType) {
-            logger.info(`[Google ContinueConversation] Step 2: Tool ${toolName} returned image (mimeType: ${imageDetails.mimeType}). Sending image via provider.`);
-            
             const imageMessageParts = googleProvider.prepareImageMessageParts(
-                imageDetails.base64ImageData, 
-                imageDetails.mimeType, 
-                toolName, 
-                this.conversation // Pass conversation for context
+                imageDetails.base64ImageData, imageDetails.mimeType, toolName, this.conversation 
             );
-            
-            logger.debug(`[Google ContinueConversation] Step 2: Sending image message parts via provider:`, JSON.stringify(imageMessageParts, null, 2));
-            let llmResponseStep2 = await googleProvider.sendMessage(imageMessageParts, true); // continuation
+            let llmResponseStep2 = await googleProvider.sendMessage(imageMessageParts, true); 
             await this.handleLLMResponse(llmResponseStep2); 
         }
-        return; // Google path handles its own calls to handleLLMResponse and returns early.
+        return; 
+
+      } else if (providerType === 'anthropic' || providerType === 'deepseek' || providerType === 'huggingface') {
+        // Generic path for Anthropic, DeepSeek, and HuggingFace
+        this._trimConversationHistory();
+        const messagesForLLM = this.currentLlmProviderInstance.formatConversation(this.conversation);
+        response = await this.currentLlmProviderInstance.sendMessage(messagesForLLM);
+        // Fall through to the generic handleLLMResponse at the end of the try block
+      } else {
+        // Should not happen if providers are correctly identified earlier
+        logger.error(`[MCPClient.continueConversation] Unknown provider type: ${providerType}. Cannot continue.`);
+        throw new Error(`Unknown provider type in continueConversation: ${providerType}`);
       }
-      // The following call to handleLLMResponse is for Anthropic and DeepSeek (if it uses a similar pattern),
-      // and potentially others if not handled by specific blocks above.
-      // OpenAI and Google paths now have explicit returns or their own handleLLMResponse calls within their blocks.
-      if (this.config.llmProvider !== 'google' && this.config.llmProvider !== 'openai') { 
+
+      // This handleLLMResponse is for Anthropic, DeepSeek, HuggingFace, and potentially others if added.
+      // OpenAI and Google have their own explicit returns or handleLLMResponse calls within their blocks.
+      if (providerType !== 'google' && providerType !== 'openai') { 
+        if (!response) {
+             logger.error(`[MCPClient.continueConversation] Response from provider ${providerType} was undefined. This is unexpected.`);
+             throw new Error(`Undefined response from ${providerType} in continueConversation.`);
+        }
         await this.handleLLMResponse(response);
       }
 
     } catch (error) {
       logger.error(`Error continuing conversation: ${error.message}`);
       console.error(`Error: ${error.message}`);
-      this.conversation.push({
-        role: 'assistant',
-        content: `An API error occurred while continuing the conversation: ${error.message}`
-      });
+      const lastConvMessage = this.conversation[this.conversation.length -1];
+      if (!(lastConvMessage && lastConvMessage.role === 'assistant' && lastConvMessage.content?.startsWith('An API error occurred'))) {
+        this.conversation.push({
+          role: 'assistant',
+          content: `An API error occurred while continuing the conversation: ${error.message}`
+        });
+      }
     }
   }
 
